@@ -1,4 +1,4 @@
-import os,json,shlex,ipywidgets as ipw
+import os,json,shlex,ipywidgets as ipw,subprocess
 
 class XnatUtils:
     def __init__(self):
