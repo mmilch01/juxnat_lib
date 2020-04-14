@@ -1,6 +1,17 @@
-import os,json,shlex,ipywidgets as ipw,subprocess
+import os,json,shlex,tempfile,ipywidgets as ipw,subprocess
+from IPython.display import FileLink
 
-class XnatUtils:
+#XnatUtils
+class XnUt:
+    
+    ipw_style={'description_width':'initial'}    
+    lay_wid60={'width':'60pt'}
+    lay_wid100={'width':'100pt'}
+    lay_wid150={'width':'150pt'}
+    lay_wid200={'width':'200pt'}
+    lay_wid250={'width':'250pt'}
+    lay_wid400={'width':'400pt'}
+    
     def __init__(self):
         pass
     
@@ -12,7 +23,14 @@ class XnatUtils:
         return_code = popen.wait()
         if return_code:
             raise subprocess.CalledProcessError(return_code, cmd)
-
+            
+    def show_file_link(out,file):
+        out.outputs=();  f=FileLink(file)
+        with out:
+            display(f)
+            
+            
+            
 class ServerParams:
     '''
     Container parameters received from XNAT
@@ -63,7 +81,7 @@ class XnatIterator:
     def _curl_cmd_path(self,path):
         return shlex.quote(self.sp.server+"/data/archive/projects/"+self.sp.project+path)
     
-    def _curl_cmd(self,path):        
+    def _curl_cmd(self,path):
         cmd=self._curl_cmd_prefix()+' '+self._curl_cmd_path(path)
         out=os.popen(cmd).read()
         return(out)
@@ -71,6 +89,17 @@ class XnatIterator:
     def curl_download_single_file(self,path,dest):
         cmd=self._curl_cmd_prefix()+' -o '+dest+' '+ self.sp.server + path
         return os.popen(cmd).read()
+        
+    def curl_download_scan(self,subject,experiment,scan,work_dir,dest_dir):
+        path=self._curl_cmd_path(
+            '/subjects/{}/experiments/{}/scans/{}/files?format=zip'.format(subject,experiment,scan))                
+        fil=tempfile.NamedTemporaryFile(mode='w+b', suffix='.zip', prefix='scan_', dir=work_dir)
+        cmd='{} -o {} {}'.format(self._curl_cmd_prefix(),fil.name,path)
+        os.system(cmd)
+        os.system('unzip '+fil.name+' -d '+work_dir)
+        os.system('mkdir -p '+dest_dir)
+        os.system('mv ' + work_dir + '/'+experiment+'/scans/'+scan+'-*/resources/DICOM/files/* '+dest_dir)
+        os.system('rm -rf '+ work_dir + '/' + experiment)
         
     def set_project(self,pr):
         self.sp.project=pr
@@ -101,7 +130,7 @@ class XnatIterator:
             else:
                 s['png']='N/A'
     
-    def list_experiments(self,subject):
+    def list_experiments(self,subject,return_dict=False):
         tq=self._curl_cmd('/subjects/'+subject+"/experiments?xsiType=xnat:imageSessionData&format=json") 
         try: 
             df=json.loads(tq)
@@ -110,12 +139,16 @@ class XnatIterator:
             return []
         exps=sorted(df['ResultSet']['Result'], key=lambda k:k['date'])
         self._experiments=[f['label'] for f in exps]
-        return self._experiments
+        if not return_dict:
+            return self._experiments
+        expd={}
+        for e in exps: expd[e['label']]=e
+        return expd
     
     def list_scans(self,subject,experiment, listDcmFiles=False):
         sf=self._curl_cmd('/subjects/'+ subject +'/experiments/' \
             +experiment + "/scans?columns=ID,frames,type,series_description")
-        try: 
+        try:
             df=json.loads(sf)
         except:
             return []
@@ -189,7 +222,10 @@ class GUIPage():
         
         if not frontdesk is None:
             self.main_box.children=[frontdesk.main_box]
-    
+            
+    def set_title(self,str):
+        self._html_title.value='<h4>'+str+'</h4>'
+        
     def show(self):
         self._parent_box.children=[self._html_title,self.main_box,self._btm_box]
         if not self.frontdesk is None:
@@ -283,6 +319,7 @@ class XNATLogin(FrontDesk):
             self.sp.serialize(self._serialize_file,{},False)
         else:
             self.lbl1.value='status: connection failed'    
+            print(self.sp.jsession)
             self.enable_nav_next(False)
 
 class SubjectSelector:
@@ -319,10 +356,12 @@ class SubjectSelector:
         cmd=self._query_prefix()+'?format=json'
         sl.value='listing projects...'        
         df=json.loads(os.popen(cmd).read())
-        projs=sorted(df['ResultSet']['Result'], key=lambda k:k['ID'])
-        
+        projs=sorted(df['ResultSet']['Result'], key=lambda k:k['ID'])        
         self._projects=[f['ID'] for f in projs]
+        
         self._drop_prj.options=self._projects
+        
+        
         #print('_project_list')
         #print('self._sp.project',self._sp.project)
         #print(self._sp)
@@ -348,7 +387,8 @@ class SubjectSelector:
         #print('on_project_changed')
         #print('self._sp.project before changing',self._sp.project)
         if self._prj_changed_first_time:
-            if self._sp.project:
+            #print("self.sp.prject",self._sp.project,"options:",self._drop_prj.options)
+            if self._sp.project in self._drop_prj.options:
                 self._drop_prj.value=self._sp.project
             self._prj_changed_first_time=False    
               
@@ -367,13 +407,16 @@ class SubjectSelector:
         
                 
 class ScanSelector:
-    def __init__(self, server_params, annotation,exp_changed_callback=None,selection_callback=None):
+    def __init__(self, server_params, annotation,exp_changed_callback=None,selection_callback=None,
+                scan_types=[]):
+        select_scan_type=True if len(scan_types)>0 else False
         self._sp,self._annot,self._exp_changed_callback=server_params,annotation,exp_changed_callback
-        self._selection_callback=selection_callback
+        self._selection_callback,self._sel_scan_type,self._scan_types=selection_callback,select_scan_type,scan_types
+        
         self._annot_html=ipw.HTML(value='<b>'+annotation+'</b>')
         style={'description_width':'initial'}
         
-        self._drop_exp=ipw.Dropdown(description='study:',style=style,layout={'width':'200px'})
+        self._drop_exp=ipw.Dropdown(description='study:',style=style,layout={'width':'250px'})
         self._drop_exp.observe(self._on_experiment_changed,names='value')
         self._lbl_status=ipw.Label(description='ready',style=style,layout={'width':'200px'})        
         self._topbox=ipw.VBox([self._annot_html,ipw.HBox([self._drop_exp,self._lbl_status])])
@@ -388,7 +431,7 @@ class ScanSelector:
         for i in range(2,len(self.main_box.children)):
             self.main_box.children[i].children[0].disabled=freeze
     
-    def _on_experiment_changed(self,b):        
+    def _on_experiment_changed(self,b):
         #print('_on_experiment_changed')
         self._experiment=self._drop_exp.value
         #self.main_box.children=[ self._annot_html, self._drop_exp ]
@@ -414,8 +457,11 @@ class ScanSelector:
         #print(cmd)
         sl.value='listing experiments...'
         df=json.loads(os.popen(cmd).read())
-        exps=sorted(df['ResultSet']['Result'], key=lambda k:k['label'])        
+        exps=sorted(df['ResultSet']['Result'], key=lambda k:k['date'])    
         self._experiments=[f['label'] for f in exps]
+        self._exp_dicts={}
+        for e in exps: self._exp_dicts[e['label']]=e
+        
         self._drop_exp.options=self._experiments        
         self._drop_exp.value=self._experiments[0]
         sl.value='found {} experiment(s)'.format(len(self._experiments))
@@ -426,30 +472,54 @@ class ScanSelector:
         self._scans=scans
         style={'description_width':'initial'}
         rows=[self._topbox]
-        rows+=[ipw.HBox([
+        header=[
             ipw.Label(value='Use',style=style,layout={'width':'60px'}),
             ipw.Label(value='ID',style=style,layout={'width':'60px'}),
-            ipw.Label(value='Description',style=style,layout={'width':'220px'}),
+            ipw.Label(value='Description',style=style,layout={'width':'250px'}),
             ipw.Label(value='Frames',style=style,layout={'width':'60px'})
-        ])]        
+        ]
+        if self._sel_scan_type: header+=[ipw.Label(value='Type',style=style,layout={'width':'100px'})]
+        rows+=[ipw.HBox(header)]
+        
         for s in scans:
             ch=ipw.Checkbox(value=False,description='',style=style,layout={'width':'60px'})
             if self._selection_callback is not None:
                 ch.observe(self._selection_callback)
-            rows+=[ipw.HBox([
+            row=[
                 ch,
                 ipw.Label(value=s['ID'],style=style,layout={'width':'60px'}),
-                ipw.Label(value=s['series_description'],style=style,layout={'width':'150px'}),
+                ipw.Label(value=s['series_description'],style=style,layout={'width':'250px'}),
                 ipw.Label(value=s['frames'],style=style,layout={'width':'60px'})
-             ])]
+            ]
+            if self._sel_scan_type: 
+                sel=ipw.Dropdown(description='',style=style,layout={'width':'100px'})
+                sel.options,sel.value=self._scan_types,None
+                sel.observe(self.on_scan_type_selection_changed,names='value')
+                sel.value=None
+                row+=[sel]
+            rows+=[ipw.HBox(row)]
+            
         self.main_box.children=rows
+    
+    def on_scan_type_selection_changed(self,b):
+        #print(b['owner'])
+        for i in range(2,len(self.main_box.children)):
+            row=self.main_box.children[i].children
+            if row[4]==b['owner']: 
+                if row[0].value: row[0].value=False
+                row[0].value=True
+        
         
     def get_selected_scans(self):
         sel_scans=[]
+        exp=self._exp_dicts[self._experiment]
+        date=exp['date'] if 'date' in exp.keys() else None 
         for i in range(2,len(self.main_box.children)):
             row=self.main_box.children[i].children
             if row[0].value:
                 s=self._scans[i-2]; s['experiment']=self._experiment
+                if self._sel_scan_type: s['type']=row[4].value
+                s['date']=date
                 sel_scans+=[s]
         return sel_scans
     
