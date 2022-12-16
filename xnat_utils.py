@@ -1,4 +1,4 @@
-import os,json,shlex,tempfile,ipywidgets as ipw,subprocess
+import inspect,os,json,shlex,tempfile,csv,ipywidgets as ipw,subprocess
 from IPython.display import FileLink
 
 #XnatUtils
@@ -15,6 +15,11 @@ class XnUt:
     def __init__(self):
         pass
     
+    def inspect_object(obj,inspect_istype):    
+        #e.g. inspect.isclass
+        for m in inspect.getmembers(obj,inspect_istype):
+            print(m[0])
+        
     def execute(cmd):
         popen = subprocess.Popen(cmd, stdout=subprocess.PIPE, universal_newlines=True)
         for stdout_line in iter(popen.stdout.readline, ""):
@@ -29,7 +34,21 @@ class XnUt:
         with out:
             display(f)
             
-            
+    def list_dict2csv(scans, file):
+        '''Write a list of dicts to a csv file.'''
+        with open(file, 'w') as output_file:
+            dict_writer = csv.DictWriter(output_file, scans[0].keys())
+            dict_writer.writeheader()
+            dict_writer.writerows(scans)
+
+    def csv2list_dict(file):
+        '''Read a csv file into a list of dictionaries.'''
+        with open(file,'r') as inf:
+            reader = csv.DictReader(inf)
+            scans=[{k: str(v) for k,v in row.items()} 
+                      for row in csv.DictReader(inf,skipinitialspace=True)]
+        return scans    
+                   
             
 class ServerParams:
     '''
@@ -74,6 +93,7 @@ class XnatIterator:
         self._subjects=[]
         self._experiments=[]
         self._scans=[]
+        self._verbosity=0
             
     def _curl_cmd_prefix(self):
         return "curl  -k --cookie JSESSIONID=" + self.sp.jsession
@@ -83,11 +103,20 @@ class XnatIterator:
     
     def _curl_cmd(self,path):
         cmd=self._curl_cmd_prefix()+' '+self._curl_cmd_path(path)
+        if self._verbosity>0:
+            print(cmd)
         out=os.popen(cmd).read()
         return(out)
-        
+    
+    def _curl_dcmdump_cmd(self,path):
+        cmd=self._curl_cmd_prefix()+' '+shlex.quote(self.sp.server+"/data/services/dicomdump?src=/archive/projects/"+self.sp.project+path)
+        if self._verbosity>0: print(cmd)
+        out=os.popen(cmd).read()
+        return(out)
+    
     def curl_download_single_file(self,path,dest):
         cmd=self._curl_cmd_prefix()+' -o '+dest+' '+ self.sp.server + path
+        if self._verbosity>0: print (cmd)
         return os.popen(cmd).read()
         
     def curl_download_scan(self,subject,experiment,scan,work_dir,dest_dir):
@@ -95,6 +124,7 @@ class XnatIterator:
             '/subjects/{}/experiments/{}/scans/{}/files?format=zip'.format(subject,experiment,scan))                
         fil=tempfile.NamedTemporaryFile(mode='w+b', suffix='.zip', prefix='scan_', dir=work_dir)
         cmd='{} -o {} {}'.format(self._curl_cmd_prefix(),fil.name,path)
+        if self._verbosity>0: print(cmd)
         os.system(cmd)
         os.system('unzip '+fil.name+' -d '+work_dir)
         os.system('mkdir -p '+dest_dir)
@@ -145,15 +175,26 @@ class XnatIterator:
         for e in exps: expd[e['label']]=e
         return expd
     
-    def list_scans(self,subject,experiment, listDcmFiles=False):
+    def list_scans(self,subject,experiment, listDcmFiles=False, include_dcm_tags=[], include_xnat_fields=[]):
+        '''
+        listDcmFiles: list all files that belong to this scan
+        include_dcm_tags: get specified DICOM tags using the dicomdump service
+        dcm tag format: "[group][element]", e.g. "0020000d"
+        '''
+        #print(1)
+        columns="ID,frames,type,series_description"
+        if len(include_xnat_fields)>0:
+            columns+=","+",".join(include_xnat_fields)
+            
         sf=self._curl_cmd('/subjects/'+ subject +'/experiments/' \
-            +experiment + "/scans?columns=ID,frames,type,series_description")
+            +experiment + "/scans?columns="+columns)
         try:
             df=json.loads(sf)
         except:
+            print('cannot load from {}!'.format(sf))
             return []
         self._scans=sorted(df['ResultSet']['Result'], key=lambda k:k['xnat_imagescandata_id'])
-        for s in self._scans:            
+        for s in self._scans:
             s['subject']=subject
             s['experiment']=experiment
         
@@ -161,7 +202,36 @@ class XnatIterator:
             for s in self._scans:
                 files=self.list_scan_files(subject,experiment,s['ID'])
                 s['files']=files
+                
+        if len(include_dcm_tags) > 0:
+            tag_query=""
+            for tag in include_dcm_tags:
+                tag_query+="&field="+tag
+            for s in self._scans:
+                sf=self._curl_dcmdump_cmd('/subjects/'+ subject +'/experiments/' \
+                    +experiment + '/scans/'+s['ID']+tag_query)
+                try: 
+                    ds=json.loads(sf)      
+                    tag_vals=XnatIterator.get_dcm_tag_values(ds,include_dcm_tags)
+                except: 
+                    print('cannot load JSON!')
+                    return []
+                for tag,val in zip(include_dcm_tags,tag_vals):
+                    s[tag]=val                
         return self._scans
+    
+    def get_dcm_tag_values(ds,tag_list):
+        res=ds['ResultSet']['Result']
+        tags=[ t['tag1'] for t in res ]
+        vals=[ t['value'] for t in res ]
+        out_vals=[]
+        for t in tag_list:
+            s='('+t[:4]+','+t[4:]+')'
+            ind=tags.index(s)
+            out=vals[ind] if ind >= 0 else ''
+            out_vals+=[out]
+        return out_vals
+                
     
     def get_dcm_files_for_scans(self,subject,experiment,scans):
         for s in scans:
@@ -170,9 +240,11 @@ class XnatIterator:
         
     def list_scan_files(self,subject,experiment,scan):
         sf=self._curl_cmd('/subjects/'+ subject +'/experiments/' \
-            +experiment + '/scans/'+scan+'/resources/DICOM/files')
+            +experiment + '/scans/'+scan+'/resources/DICOM/files')        
         try: df=json.loads(sf)
         except: return []
+        df=json.loads(sf)
+        
         lst=sorted(df['ResultSet']['Result'], key=lambda k:k['Name'])
         return [ f['URI'] for f in lst ]        
     """
@@ -197,6 +269,35 @@ class XnatIterator:
             with open(json_out_file, 'w') as fp:
                 json.dump(scans, fp)
         return scans
+    
+    """
+    list all scans contained in the list of experiments. 
+    Display progres in output textarea.
+    Save output in speficified json file.
+    """
+    def list_scans_in_experiments(self,subjects,experiments,output,json_out_file=None, include_dcm_tags=[],\
+                                 include_xnat_fields=[]):
+        scans,ns,nexp=[],0,len(experiments)
+        subind,ns=0,0
+        if len(subjects) != nexp: 
+            #print('list_scans_in_experiments: number of subjects must be equal to number of experiments!')
+            raise ValueError('list_scans_in_experiments: number of subjects must be equal to number of experiments!')
+        
+        for sub,e,ind in zip(subjects,experiments,range(nexp)):
+            if output: output.value='{} ({}/{}), scans: {}'.format(e,ind,nexp,ns)
+            #print('self.list_scans({},{})'.format(sub,e))
+            sscans=self.list_scans(sub,e,include_dcm_tags=include_dcm_tags,\
+                                   include_xnat_fields=include_xnat_fields)
+            for s in sscans:
+                scans.append(s)
+                ns+=1
+                
+        if json_out_file is not None:
+            with open(json_out_file, 'w') as fp:
+                json.dump(scans, fp)
+        return scans
+    
+    
     
 class GUIPage():
     def __init__(self, parent, title, page_num, max_page, btn1_label=None, btn2_label=None, frontdesk=None,plumbing=None):
@@ -319,7 +420,7 @@ class XNATLogin(FrontDesk):
             self.sp.serialize(self._serialize_file,{},False)
         else:
             self.lbl1.value='status: connection failed'    
-            print(self.sp.jsession)
+            #print(self.sp.jsession)
             self.enable_nav_next(False)
 
 class SubjectSelector:
@@ -331,7 +432,7 @@ class SubjectSelector:
         self.sbj_changed_callback=subject_changed_callback
         
         style={'description_width':'initial'}
-        self._drop_prj=ipw.Dropdown(description='project:',style=style,layout={'width':'200px'})                       
+        self._drop_prj=ipw.Dropdown(description='project:',style=style,layout={'width':'200px'})
         self._drop_prj.observe(self._on_project_changed,names='value')        
         self._drop_sbj=ipw.Dropdown(description='subject:',style=style,layout={'width':'200px'})                       
         self._drop_sbj.observe(self._on_subject_changed,names='value')        
@@ -373,11 +474,11 @@ class SubjectSelector:
         cmd=self._query_prefix()+self._drop_prj.value+'/subjects?format=json'
         sl.value='listing subjects...'
         df=json.loads(os.popen(cmd).read())
-        subjs=sorted(df['ResultSet']['Result'], key=lambda k:k['label'])        
+        subjs=sorted(df['ResultSet']['Result'], key=lambda k:k['label'])
         self._subjects=[f['label'] for f in subjs]
         if len(self._subjects) > 0:
             self._drop_sbj.options=self._subjects
-            self._drop_sbj.value=self._subjects[0]       
+            self._drop_sbj.value=self._subjects[0]
             #print(self._sp)
             self._lbl_status.value='found {} subject(s)'.format(len(self._subjects))      
         else:
