@@ -175,7 +175,8 @@ class XnatIterator:
         for e in exps: expd[e['label']]=e
         return expd
     
-    def list_scans(self,subject,experiment, listDcmFiles=False, include_dcm_tags=[], include_xnat_fields=[]):
+    def list_scans(self,subject,experiment, listDcmFiles=False, include_dcm_tags=[], include_xnat_fields=[],\
+                   verbosity=0):
         '''
         listDcmFiles: list all files that belong to this scan
         include_dcm_tags: get specified DICOM tags using the dicomdump service
@@ -199,6 +200,7 @@ class XnatIterator:
             s['experiment']=experiment
         
         if listDcmFiles:
+            print('listing files')
             for s in self._scans:
                 files=self.list_scan_files(subject,experiment,s['ID'])
                 s['files']=files
@@ -208,30 +210,38 @@ class XnatIterator:
             for tag in include_dcm_tags:
                 tag_query+="&field="+tag
             for s in self._scans:
+                if verbosity>1:
+                    print('Retrieving DICOM tags for scan {}'.format(s['ID']))
                 sf=self._curl_dcmdump_cmd('/subjects/'+ subject +'/experiments/' \
                     +experiment + '/scans/'+s['ID']+tag_query)
-                try: 
-                    ds=json.loads(sf)      
-                    tag_vals=XnatIterator.get_dcm_tag_values(ds,include_dcm_tags)
-                except: 
-                    print('cannot load JSON!')
-                    return []
+                try:
+                    ds=json.loads(sf)
+                    tag_vals=XnatIterator.get_dcm_tag_values(ds,include_dcm_tags,verbosity+1)
+                except Exception as e:
+                    print(e)
+                    print(('WARNING: cannot load JSON for scan {}. Scan will be skipped.').format(s['ID']))
+                    for tag in include_dcm_tags:
+                        s[tag]=""
+                    continue
                 for tag,val in zip(include_dcm_tags,tag_vals):
-                    s[tag]=val                
+                    s[tag]=val
         return self._scans
     
-    def get_dcm_tag_values(ds,tag_list):
+    def get_dcm_tag_values(ds,tag_list,verbosity=0):
         res=ds['ResultSet']['Result']
         tags=[ t['tag1'] for t in res ]
         vals=[ t['value'] for t in res ]
         out_vals=[]
         for t in tag_list:
             s='('+t[:4]+','+t[4:]+')'
-            ind=tags.index(s)
-            out=vals[ind] if ind >= 0 else ''
+            try:
+                ind=tags.index(s)
+                out=vals[ind]
+            except Exception as e:
+                if verbosity>0: print ('Tag',s,'not found.')
+                out=None
             out_vals+=[out]
-        return out_vals
-                
+        return out_vals                
     
     def get_dcm_files_for_scans(self,subject,experiment,scans):
         for s in scans:
@@ -276,7 +286,7 @@ class XnatIterator:
     Save output in speficified json file.
     """
     def list_scans_in_experiments(self,subjects,experiments,output,json_out_file=None, include_dcm_tags=[],\
-                                 include_xnat_fields=[]):
+                                 include_xnat_fields=[],verbosity=0):
         scans,ns,nexp=[],0,len(experiments)
         subind,ns=0,0
         if len(subjects) != nexp: 
@@ -286,8 +296,10 @@ class XnatIterator:
         for sub,e,ind in zip(subjects,experiments,range(nexp)):
             if output: output.value='{} ({}/{}), scans: {}'.format(e,ind,nexp,ns)
             #print('self.list_scans({},{})'.format(sub,e))
+            if verbosity>0:
+                print ('Listing scans in experiment {}'.format(e))
             sscans=self.list_scans(sub,e,include_dcm_tags=include_dcm_tags,\
-                                   include_xnat_fields=include_xnat_fields)
+                                   include_xnat_fields=include_xnat_fields,verbosity=verbosity)
             for s in sscans:
                 scans.append(s)
                 ns+=1
@@ -614,7 +626,7 @@ class ScanSelector:
     def get_selected_scans(self):
         sel_scans=[]
         exp=self._exp_dicts[self._experiment]
-        date=exp['date'] if 'date' in exp.keys() else None 
+        date=exp['date'] if 'date' in exp.keys() else None
         for i in range(2,len(self.main_box.children)):
             row=self.main_box.children[i].children
             if row[0].value:
@@ -635,7 +647,7 @@ class ProcessWithTextProgress:
             ipw.HBox([self._btn_run,self.lbl_status]),
             self.out
         ])
-        self.clear()       
+        self.clear()
         
     def clear(self):
         self.status('status: ready')
