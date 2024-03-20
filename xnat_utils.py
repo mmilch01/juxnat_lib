@@ -100,7 +100,13 @@ class XnatIterator:
     
     def _curl_cmd_path(self,path):
         return shlex.quote(self.sp.server+"/data/archive/projects/"+self.sp.project+path)
-    
+
+    def _curl_cmd_noprefix(self,cmd):
+        if self._verbosity>0:
+            print(cmd)
+        out=os.popen(cmd).read()
+        return(out)
+        
     def _curl_cmd(self,path):
         cmd=self._curl_cmd_prefix()+' '+self._curl_cmd_path(path)
         if self._verbosity>0:
@@ -113,6 +119,19 @@ class XnatIterator:
         if self._verbosity>0: print(cmd)
         out=os.popen(cmd).read()
         return(out)
+
+    #given scan and experiment ID, return scan info fields stored by XNAT.
+    def get_scan_info(self,uri):
+        cmd=self._curl_cmd_prefix()+" "+self.sp.server+uri+"?format=json 2>/dev/null"
+        #print(cmd)
+        tq=self._curl_cmd_noprefix(cmd)
+        #print (tq)
+        try:
+            df=json.loads(tq)
+        except:
+            print ('error loading scan info!')
+            return {}
+        return df['items'][0]['data_fields']
     
     def curl_download_single_file(self,path,dest):
         cmd=self._curl_cmd_prefix()+' -o '+dest+' '+ self.sp.server + path
